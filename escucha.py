@@ -9,6 +9,7 @@ Flujo:
 """
 import json
 import queue
+import threading
 import time
 from collections import deque
 
@@ -28,22 +29,80 @@ CARPETA_MODELO_VOSK = "vosk-model-small-es-0.42"
 # ---------------------------------------------------------
 # 🎙️ MICRÓFONO
 # ---------------------------------------------------------
+def listar_microfonos():
+    """Nombres completos de los micrófonos conectados ahorita (lista fresca
+    de Windows, incluye audífonos Bluetooth recién conectados)."""
+    try:
+        import comtypes
+        from pycaw.pycaw import AudioUtilities
+        comtypes.CoInitialize()
+        nombres = [d.FriendlyName for d in AudioUtilities.GetAllDevices(data_flow=1, device_state=1)]
+        return sorted(set(n for n in nombres if n))
+    except Exception as e:
+        logger.error(f"No pude listar micrófonos: {e}")
+        return []
+
+
+def id_microfono_predeterminado() -> str:
+    """Id del micrófono predeterminado de Windows ("" si no hay)."""
+    try:
+        import comtypes
+        from pycaw.pycaw import AudioUtilities
+        comtypes.CoInitialize()
+        microfono = AudioUtilities.GetMicrophone()
+        return microfono.GetId() if microfono else ""
+    except Exception:
+        return ""
+
+
+def _buscar_dispositivo(nombre: str):
+    """Índice de PortAudio (API MME) para el micrófono con ese nombre, o None
+    (= predeterminado). MME corta los nombres a 31 caracteres."""
+    if not nombre:
+        return None
+    mme = next((i for i, h in enumerate(sd.query_hostapis()) if "MME" in h["name"]), 0)
+    for i, d in enumerate(sd.query_devices()):
+        if d["hostapi"] == mme and d["max_input_channels"] > 0 and nombre[:31] == d["name"][:31]:
+            return i
+    logger.error(f"No encontré el micrófono '{nombre}', uso el predeterminado.")
+    return None
+
+
 class Microfono:
     """Abre el micrófono y deja bloques de 30 ms en una cola. Si el micro no
-    acepta 16 kHz, graba a su tasa nativa y convierte."""
+    acepta 16 kHz, graba a su tasa nativa y convierte.
+
+    También deja `nivel` (0 a 1) y `hay_voz` del último bloque para el
+    medidor de la ventana de ajustes, y `ultimo_audio` para detectar si el
+    micrófono dejó de mandar audio (lo desconectaste)."""
 
     def __init__(self):
-        info = sd.query_devices(kind="input")
+        # PortAudio solo ve los dispositivos que había cuando arrancó: se
+        # reinicia para que aparezcan los audífonos recién conectados.
+        sd._terminate()
+        sd._initialize()
+        self.dispositivo = _buscar_dispositivo(CONFIG.get("dispositivo_entrada", ""))
+        info = sd.query_devices(self.dispositivo, kind="input")
         self.nombre = info["name"]
         try:
-            sd.check_input_settings(samplerate=TASA, channels=1, dtype="float32")
+            sd.check_input_settings(device=self.dispositivo, samplerate=TASA, channels=1, dtype="float32")
             self.tasa_entrada = TASA
         except Exception:
             self.tasa_entrada = int(info["default_samplerate"])
         self.cola = queue.Queue(maxsize=2000)  # ~60 s de audio como máximo
         self._resto = np.zeros(0, dtype=np.int16)
-        self._stream = sd.InputStream(samplerate=self.tasa_entrada, channels=1, dtype="float32",
-                                      blocksize=int(self.tasa_entrada * 0.03), callback=self._callback)
+        self.nivel = 0.0
+        self.hay_voz = False
+        self.ultimo_audio = time.time()
+        self.id_predeterminado = id_microfono_predeterminado()
+        try:
+            import webrtcvad
+            self._vad_medidor = webrtcvad.Vad(int(CONFIG.get("sensibilidad_vad", 2)))
+        except Exception:
+            self._vad_medidor = None
+        self._stream = sd.InputStream(device=self.dispositivo, samplerate=self.tasa_entrada, channels=1,
+                                      dtype="float32", blocksize=int(self.tasa_entrada * 0.03),
+                                      callback=self._callback)
         logger.info(f"Micro: {self.nombre} @ {self.tasa_entrada} Hz")
 
     def __enter__(self):
@@ -55,6 +114,7 @@ class Microfono:
         self._stream.close()
 
     def _callback(self, indata, frames, time_info, status):
+        self.ultimo_audio = time.time()
         if estado.ia_hablando:  # no grabarse a sí mismo
             return
         x = indata[:, 0]
@@ -76,6 +136,14 @@ class Microfono:
                 except queue.Empty:
                     pass
         self._resto = datos[completos * MUESTRAS_BLOQUE:]
+        if completos:  # medidor: nivel y si el último bloque parece voz
+            ultimo = datos[(completos - 1) * MUESTRAS_BLOQUE:completos * MUESTRAS_BLOQUE]
+            self.nivel = min(1.0, float(np.sqrt(np.mean(ultimo.astype(np.float32) ** 2))) / 6000)
+            try:
+                self.hay_voz = bool(self._vad_medidor and self.nivel > 0.03
+                                    and self._vad_medidor.is_speech(ultimo.tobytes(), TASA))
+            except Exception:
+                self.hay_voz = False
 
     def leer(self, timeout=0.1):
         try:
@@ -119,9 +187,9 @@ class DetectorVoz:
 _vad = None
 
 
-def detector_voz() -> DetectorVoz:
+def detector_voz(nuevo: bool = False) -> DetectorVoz:
     global _vad
-    if _vad is None:
+    if _vad is None or nuevo:
         _vad = DetectorVoz()
     return _vad
 
@@ -193,27 +261,86 @@ def capturar(mic: Microfono, espera_inicio=6.0, silencio_fin=1.2, max_total=20.0
 
 
 _reconocedor = sr.Recognizer()
+_reconocedor.operation_timeout = 6  # sin esto, sin internet se quedaba esperando mucho
+_ultimo_intento_google = 0.0
+
+
+# ---------------------------------------------------------
+# 🐕 MODELO LOCAL (Vosk): palabra clave y respaldo sin internet
+# ---------------------------------------------------------
+_modelo_vosk = None
+
+
+def modelo_vosk():
+    """Carga el modelo una sola vez (tarda ~1 s) y lo comparten el detector
+    de palabra clave y el reconocimiento sin internet. None si no está."""
+    global _modelo_vosk
+    if _modelo_vosk is None:
+        ruta = buscar_recurso("modelos", CARPETA_MODELO_VOSK)
+        if not ruta:
+            logger.error(f"No encontré modelos/{CARPETA_MODELO_VOSK}.")
+            return None
+        import vosk
+        vosk.SetLogLevel(-1)
+        _modelo_vosk = vosk.Model(ruta)
+    return _modelo_vosk
+
+
+def reconocer_sin_internet(audio: bytes) -> str:
+    """Reconoce con Vosk (vocabulario completo). Menos preciso que Google,
+    pero alcanza para comandos básicos: volumen, pausa, abrir apps, hora."""
+    modelo = modelo_vosk()
+    if modelo is None or not audio:
+        return ""
+    import vosk
+    rec = vosk.KaldiRecognizer(modelo, TASA)
+    rec.AcceptWaveform(audio)
+    texto = json.loads(rec.FinalResult()).get("text", "").strip()
+    if texto:
+        print(f"🎙️ [Escuchado sin internet]: '{texto}'")
+    return texto
+
+
+def _marcar_internet(hay: bool):
+    if hay and estado.sin_internet:
+        logger.info("Internet de vuelta: uso Google otra vez.")
+    elif not hay and not estado.sin_internet:
+        logger.error("Sin internet: paso a modo básico (Vosk + voz de Windows).")
+        from voz import mandar_notificacion
+        mandar_notificacion("📴 Sin internet", "Solo entiendo comandos básicos hasta que vuelva la conexión.")
+    estado.sin_internet = not hay
 
 
 def reconocer(audio: bytes) -> str:
-    """Manda el audio a Google y regresa el texto en minúsculas ("" si no se entendió)."""
+    """Texto en minúsculas de lo que dijiste ("" si no se entendió).
+
+    Usa Google; si no hay internet usa Vosk. Mientras no haya conexión,
+    reintenta Google solo cada 30 s para no hacerte esperar en cada orden."""
+    global _ultimo_intento_google
     if not audio:
         return ""
+    if estado.sin_internet and time.time() - _ultimo_intento_google < 30:
+        return reconocer_sin_internet(audio)
+
     muestras = np.frombuffer(audio, dtype=np.int16).astype(np.float32)
     pico = np.max(np.abs(muestras))
     if pico > 0:  # normaliza el volumen: Google entiende mejor
         muestras = muestras / pico * 0.9 * 32767
     datos = sr.AudioData(muestras.astype(np.int16).tobytes(), TASA, 2)
+    _ultimo_intento_google = time.time()
     try:
         texto = _reconocedor.recognize_google(datos, language="es-MX").lower().strip()
+        _marcar_internet(True)
         if texto:
             print(f"🎙️ [Escuchado]: '{texto}'")
         return texto
     except sr.UnknownValueError:
+        _marcar_internet(True)
         return ""
-    except sr.RequestError as e:
-        logger.error(f"Error de conexión con el reconocimiento de voz: {e}")
-        return ""
+    except (sr.RequestError, OSError, TimeoutError) as e:
+        logger.error(f"Google no responde ({e}); uso Vosk.")
+        _marcar_internet(False)
+        return reconocer_sin_internet(audio)
     except Exception as e:
         logger.error(f"Error reconociendo audio: {e}")
         return ""
@@ -224,17 +351,12 @@ def escuchar(mic: Microfono, **kwargs) -> str:
     return reconocer(capturar(mic, **kwargs))
 
 
-# ---------------------------------------------------------
-# 🐕 PALABRA CLAVE SIN INTERNET (Vosk)
-# ---------------------------------------------------------
 class DetectorPalabraClave:
-    """Escucha continuamente con un modelo local restringido a la palabra
+    """Escucha continuamente con el modelo local restringido a la palabra
     clave. Así no se manda audio a Google hasta que dices "Solovino"."""
 
-    def __init__(self, ruta_modelo: str):
+    def __init__(self, modelo):
         import vosk
-        vosk.SetLogLevel(-1)
-        modelo = vosk.Model(ruta_modelo)
         # Vosk solo puede buscar frases cuyas palabras estén en su vocabulario
         # ("solovino" no está, "solo vino" sí).
         self.frases = [f for f in PALABRAS_CLAVE
@@ -262,15 +384,35 @@ def crear_detector_palabra_clave():
     """Regresa el detector local, o None para usar Google (sin modelo o desactivado)."""
     if CONFIG.get("deteccion_palabra_clave", "local") != "local":
         return None
-    ruta = buscar_recurso("modelos", CARPETA_MODELO_VOSK)
-    if not ruta:
-        logger.error(f"No encontré modelos/{CARPETA_MODELO_VOSK}; detecto la palabra clave con Google.")
-        return None
     try:
-        return DetectorPalabraClave(ruta)
+        modelo = modelo_vosk()
+        return DetectorPalabraClave(modelo) if modelo else None
     except Exception as e:
         logger.exception(f"No pude cargar Vosk, uso Google: {e}")
         return None
+
+
+def _vigilar_microfono():
+    """Cada 2 s revisa si hay que reabrir el micrófono:
+    - cambiaste el micro predeterminado de Windows (conectaste audífonos), o
+    - el micro dejó de mandar audio (lo desconectaste)."""
+    while estado.running:
+        time.sleep(2)
+        mic = estado.microfono
+        if mic is None or estado.reiniciar_escucha.is_set():
+            continue
+        motivo = None
+        if not CONFIG.get("dispositivo_entrada") and id_microfono_predeterminado() not in ("", mic.id_predeterminado):
+            motivo = "cambió el micrófono predeterminado"
+        elif time.time() - mic.ultimo_audio > 3:
+            motivo = "el micrófono dejó de mandar audio"
+        if motivo:
+            logger.info(f"Reabriendo micrófono: {motivo}")
+            estado.reiniciar_escucha.set()
+
+
+def iniciar_vigilancia_microfono():
+    threading.Thread(target=_vigilar_microfono, daemon=True, name="vigila-micro").start()
 
 
 def separar_orden(texto: str):

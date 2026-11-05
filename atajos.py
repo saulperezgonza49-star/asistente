@@ -2,7 +2,8 @@
 
 Se revisa el estado del teclado cada 20 ms con GetAsyncKeyState: no
 necesita permisos de administrador ni librerías extra (bueno para el .exe),
-y no le quita la tecla a la app que estés usando.
+y no le quita la tecla a la app que estés usando. Si cambias la tecla en
+Ajustes, se aplica sola sin reiniciar.
 """
 import ctypes
 import threading
@@ -32,11 +33,20 @@ def parsear_combinacion(texto: str):
     return codigos
 
 
-def _hilo_teclado(codigos):
+def _hilo_teclado():
     leer = ctypes.windll.user32.GetAsyncKeyState
-    anterior = False
+    combinacion, codigos, anterior = None, [], False
     while estado.running:
-        presionada = all(leer(c) & 0x8000 for c in codigos)
+        actual = CONFIG.get("tecla_hablar", "") or ""
+        if actual != combinacion:  # cambió en Ajustes (o es la primera vez)
+            combinacion = actual
+            try:
+                codigos = parsear_combinacion(actual) if actual else []
+                logger.info(f"Tecla para hablar: {actual or 'desactivada'}")
+            except ValueError as e:
+                logger.error(f"tecla_hablar inválida: {e}")
+                codigos = []
+        presionada = bool(codigos) and all(leer(c) & 0x8000 for c in codigos)
         if presionada and not anterior:
             estado.tecla_evento.set()
             estado.interrumpir_voz.set()  # si estaba hablando, que se calle y te escuche
@@ -46,14 +56,4 @@ def _hilo_teclado(codigos):
 
 
 def iniciar_tecla_hablar():
-    combinacion = CONFIG.get("tecla_hablar", "")
-    if not combinacion:
-        return None
-    try:
-        codigos = parsear_combinacion(combinacion)
-    except ValueError as e:
-        logger.error(f"tecla_hablar inválida en config.json: {e}")
-        return None
-    threading.Thread(target=_hilo_teclado, args=(codigos,), daemon=True, name="teclado").start()
-    logger.info(f"Tecla para hablar: {combinacion}")
-    return combinacion
+    threading.Thread(target=_hilo_teclado, daemon=True, name="teclado").start()

@@ -24,9 +24,30 @@ for _stream in (sys.stdout, sys.stderr):
 # ---------------------------------------------------------
 # 🔑 .env (junto al .exe/main.py, o en %APPDATA%\Solovino)
 # ---------------------------------------------------------
+VERSION = "3.1"
+
 _env = buscar_recurso(".env")
 if _env:
     load_dotenv(_env)
+
+
+def guardar_clave(nombre: str, valor: str):
+    """Guarda una API key en el .env que se cargó (o en %APPDATA%\\Solovino\\.env
+    si no hay uno o no se puede escribir, p. ej. el .exe en Archivos de programa)
+    y la aplica de inmediato."""
+    from dotenv import set_key
+    valor = valor.strip()
+    for ruta in (buscar_recurso(".env"), ruta_datos(".env")):
+        if not ruta:
+            continue
+        try:
+            if not os.path.exists(ruta):
+                open(ruta, "a", encoding="utf-8").close()
+            set_key(ruta, nombre, valor, quote_mode="never")
+            break
+        except OSError:
+            continue
+    os.environ[nombre] = valor
 
 # ---------------------------------------------------------
 # 📝 LOGGING A ARCHIVO
@@ -57,6 +78,7 @@ CONFIG_DEFAULT = {
     "tecla_hablar": "ctrl+alt+space",    # mantener = hablar mientras la presionas; toque = escucha hasta que te calles
 
     # --- Escucha ---
+    "dispositivo_entrada": "",           # "" = el micrófono predeterminado de Windows (sigue al que cambies)
     "sensibilidad_vad": 2,               # 0 a 3: qué tan estricto es para decidir que algo es voz (3 = ignora más ruido)
     "factor_ganancia": 1.0,
     "nivel_volumen_escucha": 0.15,
@@ -105,6 +127,15 @@ def cargar_config():
 
 
 CONFIG = cargar_config()
+
+
+def guardar_config(cambios: dict):
+    """Actualiza CONFIG en su lugar (todos los módulos ven el cambio al
+    instante) y lo escribe en config.json."""
+    CONFIG.update(cambios)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(CONFIG, f, indent=4, ensure_ascii=False)
+    logger.info(f"Configuración guardada: {cambios}")
 NOMBRE = CONFIG["nombre_usuario"]
 PALABRA_CLAVE = CONFIG["palabra_clave"].lower().strip()  # el texto reconocido siempre llega en minúsculas
 # Las más largas primero, para que "solo vino" gane sobre "sol vino" al recortar la orden.

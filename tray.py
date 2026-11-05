@@ -1,18 +1,18 @@
-"""Ícono en la bandeja del sistema: muestra el estado con colores y tiene el
-menú para salir, iniciar con Windows, conectar Spotify y abrir la configuración."""
-import os
+"""Ícono en la bandeja del sistema: el perrito con un punto del color del
+estado, y el menú (Ajustes, Spotify, inicio con Windows, reiniciar, salir).
+Doble clic en el ícono abre Ajustes."""
 import threading
 
 import pystray
-from PIL import Image, ImageDraw
 
+import ajustes
 import autoarranque
 import estado
-from config import CONFIG, logger
-from rutas import DIR_DATOS
+import icono
+from config import CONFIG, VERSION, logger
 
 COLORES = {
-    estado.DORMIDO: (110, 110, 110),     # gris: esperando la palabra clave
+    estado.DORMIDO: (130, 130, 130),     # gris: esperando la palabra clave
     estado.ESCUCHANDO: (0, 200, 120),    # verde: te está escuchando
     estado.PENSANDO: (60, 140, 255),     # azul: consultando a Gemini
     estado.HABLANDO: (255, 170, 0),      # naranja: está hablando
@@ -26,23 +26,19 @@ TEXTOS = {
     estado.DICTANDO: "Dictando",
 }
 
-
-def _imagen(color):
-    imagen = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    dibujo = ImageDraw.Draw(imagen)
-    dibujo.ellipse((4, 4, 60, 60), fill=(25, 25, 25))
-    dibujo.ellipse((12, 12, 52, 52), fill=color)
-    return imagen
+_IMAGENES = {nombre: icono.dibujar(64, color) for nombre, color in COLORES.items()}
 
 
-_IMAGENES = {nombre: _imagen(color) for nombre, color in COLORES.items()}
+def _texto_estado(nuevo):
+    texto = TEXTOS.get(nuevo, nuevo)
+    return f"{texto} (sin internet)" if estado.sin_internet else texto
 
 
 def _al_cambiar_estado(nuevo):
-    icono = estado.icono_bandeja
-    if icono is not None:
-        icono.icon = _IMAGENES.get(nuevo, _IMAGENES[estado.DORMIDO])
-        icono.title = f"Solovino — {TEXTOS.get(nuevo, nuevo)}"
+    icono_bandeja = estado.icono_bandeja
+    if icono_bandeja is not None:
+        icono_bandeja.icon = _IMAGENES.get(nuevo, _IMAGENES[estado.DORMIDO])
+        icono_bandeja.title = f"Solovino — {_texto_estado(nuevo)}"
 
 
 def _conectar_spotify(icon, item):
@@ -52,28 +48,30 @@ def _conectar_spotify(icon, item):
     threading.Thread(target=_tarea, daemon=True).start()
 
 
-def iniciar_icono_bandeja(on_salir):
+def iniciar_icono_bandeja(on_salir, on_reiniciar):
     """Muestra el ícono en su propio hilo y regresa de inmediato, para que el
     hilo principal quede libre y Ctrl+C funcione."""
     def _salir(icon, item):
         logger.info("Cierre solicitado desde el ícono de la bandeja.")
         on_salir()
 
-    tecla = CONFIG.get("tecla_hablar") or "sin tecla"
     try:
         estado.icono_bandeja = pystray.Icon(
             "solovino",
             _IMAGENES[estado.DORMIDO],
             "Solovino",
             menu=pystray.Menu(
-                pystray.MenuItem(lambda item: f"🐕 {TEXTOS.get(estado.actual, estado.actual)}", None, enabled=False),
-                pystray.MenuItem(f"Tecla para hablar: {tecla}", None, enabled=False),
+                pystray.MenuItem(lambda item: f"🐕 Solovino {VERSION} · {_texto_estado(estado.actual)}",
+                                 None, enabled=False),
+                pystray.MenuItem(lambda item: f"Tecla para hablar: {CONFIG.get('tecla_hablar') or 'ninguna'}",
+                                 None, enabled=False),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Ajustes…", lambda icon, item: ajustes.abrir(), default=True),
+                pystray.MenuItem("Conectar Spotify", _conectar_spotify),
                 pystray.MenuItem("Iniciar con Windows", lambda icon, item: autoarranque.alternar(),
                                  checked=lambda item: autoarranque.activo()),
-                pystray.MenuItem("Conectar Spotify", _conectar_spotify),
-                pystray.MenuItem("Abrir configuración", lambda icon, item: os.startfile(DIR_DATOS)),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Reiniciar", lambda icon, item: on_reiniciar()),
                 pystray.MenuItem("Salir", _salir),
             ),
         )

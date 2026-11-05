@@ -43,11 +43,12 @@ def _dividir_en_frases(texto: str):
     return frases or [texto]
 
 
-def _generar_audio(texto: str):
+def _generar_audio(texto: str, voz: str = None, velocidad: str = None):
     """Genera el mp3 de una frase. Las frases cortas se guardan en caché
     ("Listo.", "Siguiente."...) para que suenen al instante la próxima vez."""
     import edge_tts
-    voz, velocidad = CONFIG["voz_neural"], CONFIG["velocidad_voz"]
+    voz = voz or CONFIG["voz_neural"]
+    velocidad = velocidad or CONFIG["velocidad_voz"]
     cachear = len(texto) <= 60
     if cachear:
         clave = hashlib.md5(f"{voz}|{velocidad}|{texto}".encode("utf-8")).hexdigest()
@@ -60,16 +61,22 @@ def _generar_audio(texto: str):
     async def _guardar():
         await asyncio.wait_for(edge_tts.Communicate(texto, voz, rate=velocidad).save(ruta), timeout=10)
 
-    try:
-        asyncio.run(_guardar())
-        return ruta, not cachear  # (ruta, hay_que_borrarlo_después)
-    except Exception as e:
-        logger.error(f"edge-tts falló: {e}")
+    # El servicio de Microsoft a veces responde "No audio was received" sin
+    # razón (≈1 de cada 3 veces en pruebas): se reintenta antes de rendirse.
+    for intento in range(3):
         try:
-            os.remove(ruta)
-        except OSError:
-            pass
-        return None, False
+            asyncio.run(_guardar())
+            return ruta, not cachear  # (ruta, hay_que_borrarlo_después)
+        except Exception as e:
+            error = e
+            if "NoAudioReceived" not in type(e).__name__ and "No audio" not in str(e):
+                break  # otro error (sin internet, etc.): no tiene caso reintentar
+    logger.error(f"edge-tts falló: {error}")
+    try:
+        os.remove(ruta)
+    except OSError:
+        pass
+    return None, False
 
 
 def _mci(comando: str) -> str:
@@ -170,7 +177,7 @@ def hablar(texto: str):
     estado.ia_hablando = True
     try:
         pendiente = [texto]
-        if CONFIG.get("usar_voz_neural", True):
+        if CONFIG.get("usar_voz_neural", True) and not estado.sin_internet:
             pendiente = _hablar_neural(texto)
         if pendiente and not _debe_callarse():
             _hablar_sapi(" ".join(pendiente))
@@ -182,6 +189,32 @@ def hablar(texto: str):
             estado.microfono.vaciar()
         estado.ia_hablando = False
         estado.cambiar(estado_previo if estado_previo != estado.HABLANDO else estado.DORMIDO)
+
+
+VOCES_NEURALES = ["es-MX-JorgeNeural", "es-MX-DaliaNeural", "es-US-AlonsoNeural", "es-US-PalomaNeural",
+                  "es-ES-AlvaroNeural", "es-ES-ElviraNeural", "es-AR-TomasNeural", "es-CO-GonzaloNeural"]
+
+
+def probar_voz(voz: str, velocidad: str, usar_neural: bool = True) -> str:
+    """Para la ventana de ajustes: dice una frase con la voz elegida (sin
+    guardar nada). Regresa "" si salió bien o el error."""
+    texto = f"Hola {CONFIG['nombre_usuario']}, así sueno yo."
+    estado.ia_hablando = True
+    try:
+        if usar_neural:
+            ruta, borrar = _generar_audio(texto, voz, velocidad)
+            if ruta is None:
+                return "No pude generar la voz neural (¿hay internet?)."
+            _reproducir_mp3(ruta)
+            if borrar:
+                os.remove(ruta)
+        else:
+            _hablar_sapi(texto)
+        return ""
+    except Exception as e:
+        return str(e)
+    finally:
+        estado.ia_hablando = False
 
 
 def pitido(frecuencia=880, duracion_ms=120):

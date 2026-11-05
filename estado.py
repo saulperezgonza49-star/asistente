@@ -20,6 +20,10 @@ tecla_presionada = False             # True mientras la mantienes presionada
 tecla_evento = threading.Event()     # se activa cada vez que la presionas
 interrumpir_voz = threading.Event()  # pide a hablar() que se calle
 
+# --- Escucha ---
+reiniciar_escucha = threading.Event()  # pide reabrir el micrófono (cambiaste de micro o de ajustes)
+sin_internet = False                   # True tras fallar Google: usa Vosk y la voz de Windows
+
 # --- Avisos de recordatorios para decir en voz alta (los pone recordatorios.py) ---
 anuncios = queue.Queue()
 

@@ -74,7 +74,7 @@ class TestCaptura(unittest.TestCase):
 class TestPalabraClave(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.detector = escucha.DetectorPalabraClave(buscar_recurso("modelos", escucha.CARPETA_MODELO_VOSK))
+        cls.detector = escucha.DetectorPalabraClave(escucha.modelo_vosk())
 
     def detecta(self, texto: str) -> bool:
         self.detector.reiniciar()

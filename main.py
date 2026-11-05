@@ -31,20 +31,38 @@ except Exception:
     except Exception:
         pass
 
+import sys as _sys
+
+# En el .exe sin consola no hay stdout/stderr. Los programas que Solovino
+# abre (flac, que manda el audio a Google; PowerShell; taskkill) heredan esos
+# "handles" inválidos y Windows los rechaza (WinError 50 / 6). Se les da NUL.
+if getattr(_sys, "frozen", False) and _sys.stdout is None:
+    import msvcrt
+    _nul_lectura = open(os.devnull, "r")
+    _nul_escritura = open(os.devnull, "w")
+    _sys.stdout = _sys.stderr = _nul_escritura
+    ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(_nul_lectura.fileno()))    # STDIN
+    for _std in (-11, -12):                                                                  # STDOUT, STDERR
+        ctypes.windll.kernel32.SetStdHandle(_std, msvcrt.get_osfhandle(_nul_escritura.fileno()))
+
 import estado
-from config import CONFIG, NOMBRE, logger
+from config import CONFIG, NOMBRE, VERSION, logger
 from utils import contiene
+import ajustes
 import atajos
 import dictado
+import instancia
 import ia
 import recordatorios
 from escucha import (Microfono, capturar, reconocer, escuchar, separar_orden,
-                     crear_detector_palabra_clave)
+                     crear_detector_palabra_clave, detector_voz, iniciar_vigilancia_microfono)
 from voz import hablar, pitido, mandar_notificacion, limpiar_cache_voz
 from volumen import bajar_volumen, restaurar_volumen
 from multimedia import pausar_video_para_escuchar, reanudar_video
 from comandos import ejecutar_comando_local
 from tray import iniciar_icono_bandeja
+
+_micro_anterior = None  # para avisar solo cuando de verdad cambias de micrófono
 
 PALABRAS_SALIR = ("salir", "adiós", "adios", "apágate", "apagate", "ciérrate", "cierrate")
 
@@ -60,6 +78,14 @@ def apagar(motivo: str):
             estado.icono_bandeja.stop()
         except Exception:
             pass
+
+
+def reiniciar():
+    """Cierra este Solovino y abre uno nuevo (para aplicar el nombre, etc.)."""
+    logger.info("Reiniciando Solovino")
+    instancia.liberar()
+    instancia.lanzar_nueva_instancia()
+    apagar("reinicio")
 
 
 def _tecla_o_anuncio() -> bool:
@@ -81,6 +107,8 @@ def esperar_activacion(mic, detector):
     if detector:
         detector.reiniciar()
     while estado.running:
+        if estado.reiniciar_escucha.is_set():
+            return "reiniciar", None
         if estado.tecla_evento.is_set():
             return "tecla", None
         if not estado.anuncios.empty():
@@ -181,6 +209,8 @@ def anunciar(mensaje: str):
 
 
 def chat_por_voz():
+    estado.reiniciar_escucha.clear()
+    detector_voz(nuevo=True)  # por si cambió la sensibilidad en Ajustes
     detector = crear_detector_palabra_clave()
     ia.disponible()  # deja en el log si falta la API key
 
@@ -190,13 +220,18 @@ def chat_por_voz():
         tecla = CONFIG.get("tecla_hablar") or "sin tecla"
         modo = "local (sin internet)" if detector else "con Google"
         print(f"💤 Solovino listo. Di 'Solovino' [{modo}] o usa {tecla}. Ctrl+C para salir.")
-        mandar_notificacion("Solovino listo", f"Di 'Solovino' o usa {tecla}.")
+        global _micro_anterior
+        if _micro_anterior is None:
+            mandar_notificacion("Solovino listo", f"Di 'Solovino' o usa {tecla}.")
+        elif _micro_anterior != mic.nombre:
+            mandar_notificacion("🎙️ Cambié de micrófono", mic.nombre)
+        _micro_anterior = mic.nombre
 
         while estado.running:
             try:
                 tipo, dato = esperar_activacion(mic, detector)
-                if tipo == "salir":
-                    break
+                if tipo in ("salir", "reiniciar"):
+                    break  # "reiniciar": el supervisor vuelve a abrir el micrófono
                 if tipo == "anuncio":
                     anunciar(dato)
                     continue
@@ -240,10 +275,29 @@ def hilo_supervisor():
 
 
 def main():
-    logger.info("=== Solovino iniciando ===")
+    import sys
+    if "--diagnostico" in sys.argv:
+        import diagnostico
+        diagnostico.correr(abrir_reporte="--silencioso" not in sys.argv)
+        logging.shutdown()
+        os._exit(0)
+    # Solo un Solovino a la vez. Al reiniciar, espera a que el viejo se cierre.
+    if not instancia.adquirir(esperar_segundos=8 if "--reinicio" in sys.argv else 0):
+        print("Solovino ya está corriendo (busca el perrito junto al reloj).")
+        mandar_notificacion("Solovino ya está abierto", "Búscalo junto al reloj.")
+        logger.info("Ya había otra instancia; me salgo.")
+        os._exit(0)
+
+    logger.info(f"=== Solovino {VERSION} iniciando ===")
     limpiar_cache_voz()
-    iniciar_icono_bandeja(on_salir=lambda: apagar("ícono de la bandeja"))
+    ajustes.al_reiniciar = reiniciar
+    iniciar_icono_bandeja(on_salir=lambda: apagar("ícono de la bandeja"), on_reiniciar=reiniciar)
     atajos.iniciar_tecla_hablar()
+    iniciar_vigilancia_microfono()
+    if not os.environ.get("GEMINI_API_KEY"):
+        # Primera vez (o .exe nuevo sin .env): abre Ajustes para pegar la key.
+        mandar_notificacion("Falta la API key de Gemini", "Pégala en la ventana de Ajustes.")
+        ajustes.abrir("claves")
     recordatorios.iniciar()
     threading.Thread(target=hilo_supervisor, daemon=True, name="asistente").start()
 

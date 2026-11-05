@@ -93,7 +93,10 @@ def _con_reintento(funcion):
 def responder(orden: str) -> str:
     """Manda la orden al agente y regresa lo que hay que decir."""
     global _chat, _ultimo_uso
+    import estado
     from sistema import fecha_hora_contexto
+    if estado.sin_internet:
+        return "Ahorita no tengo internet, así que solo puedo hacer comandos básicos."
     try:
         if _chat is None or time.time() - _ultimo_uso > CONFIG["minutos_memoria_chat"] * 60:
             _chat = _nuevo_chat()
