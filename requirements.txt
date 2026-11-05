@@ -1,0 +1,22 @@
+comtypes==1.4.16
+edge-tts==7.3.1
+google-genai==2.3.0
+numpy==2.4.5
+pillow==12.3.0
+plyer==2.1.0
+psutil==7.2.2
+PyAutoGUI==0.9.54
+pycaw==20251023
+pyperclip==1.11.0
+pystray==0.19.5
+python-dotenv==1.2.2
+pywin32==311
+sounddevice==0.5.5
+SpeechRecognition==3.16.1
+spotipy==2.26.0
+standard-aifc==3.13.0
+audioop-lts==0.2.2
+vosk==0.3.45
+webrtcvad-wheels==2.0.14.post1
+# Modelo de voz para la palabra clave (no va en git, ~39 MB), descomprimir en modelos/:
+# https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
