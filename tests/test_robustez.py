@@ -46,6 +46,13 @@ class TestSinInternet(unittest.TestCase):
 
 
 class TestUnaSolaInstancia(unittest.TestCase):
+    def setUp(self):
+        # Nombre propio para la prueba: si tienes Solovino abierto, el mutex
+        # real ya está ocupado y la prueba fallaría sin que haya ningún bug.
+        parche = mock.patch.object(instancia, "_NOMBRE", "Local\\Solovino_prueba_unittest")
+        parche.start()
+        self.addCleanup(parche.stop)
+
     def test_segunda_instancia_se_rechaza(self):
         self.assertTrue(instancia.adquirir())
         try:

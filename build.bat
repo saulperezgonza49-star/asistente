@@ -19,6 +19,14 @@ if not exist "modelos\vosk-model-small-es-0.42" (
     exit /b 1
 )
 
+rem Si Solovino.exe esta abierto, Windows no deja reemplazarlo.
+rem Rutas completas: en algunas terminales (Git Bash) "find" es otro programa.
+"%SystemRoot%\System32\tasklist.exe" /FI "IMAGENAME eq Solovino.exe" /NH | "%SystemRoot%\System32\findstr.exe" /I "Solovino.exe" >nul
+if not errorlevel 1 (
+    echo Solovino esta abierto. Cierralo desde el icono del perrito, Salir, y vuelve a correr build.bat.
+    exit /b 1
+)
+
 echo.
 echo == 1/4 Pruebas ==
 "%PY%" -m unittest || (echo. & echo Las pruebas fallaron, no genero el .exe. & exit /b 1)
