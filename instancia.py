@@ -35,6 +35,37 @@ def adquirir(esperar_segundos: float = 0) -> bool:
         time.sleep(0.3)
 
 
+_EVENTO_SALIR = "Local\\Solovino_pedir_salir"
+_SYNCHRONIZE_Y_MODIFICAR = 0x00100000 | 0x0002  # SYNCHRONIZE | EVENT_MODIFY_STATE
+
+
+def escuchar_peticion_de_salir(al_pedir):
+    """Hilo que espera a que alguien corra `Solovino.exe --salir` y entonces
+    llama `al_pedir()`. Sirve aunque el ícono de la bandeja no responda."""
+    import threading
+    kernel32 = ctypes.windll.kernel32
+    evento = kernel32.CreateEventW(None, True, False, _EVENTO_SALIR)
+    if not evento:
+        return
+
+    def esperar():
+        if kernel32.WaitForSingleObject(evento, 0xFFFFFFFF) == 0:  # INFINITE; 0 = WAIT_OBJECT_0
+            al_pedir()
+    threading.Thread(target=esperar, daemon=True, name="pedir-salir").start()
+
+
+def pedir_salir_a_la_instancia_abierta() -> bool:
+    """Para `Solovino.exe --salir`: avisa a la instancia abierta que se cierre.
+    Regresa False si no había ninguna abierta."""
+    kernel32 = ctypes.windll.kernel32
+    evento = kernel32.OpenEventW(_SYNCHRONIZE_Y_MODIFICAR, False, _EVENTO_SALIR)
+    if not evento:
+        return False
+    kernel32.SetEvent(evento)
+    kernel32.CloseHandle(evento)
+    return True
+
+
 def liberar():
     global _handle
     if _handle:

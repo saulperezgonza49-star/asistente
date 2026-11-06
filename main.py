@@ -33,13 +33,15 @@ except Exception:
 
 import sys as _sys
 
-# En el .exe sin consola no hay stdout/stderr. Los programas que Solovino
-# abre (flac, que manda el audio a Google; PowerShell; taskkill) heredan esos
-# "handles" inválidos y Windows los rechaza (WinError 50 / 6). Se les da NUL.
-if getattr(_sys, "frozen", False) and _sys.stdout is None:
+# En el .exe sin consola, los "handles" de entrada/salida que hereda pueden
+# ser inválidos (doble clic, inicio con Windows) o de otro programa (si lo
+# abrió una terminal o un .bat). Los programas que Solovino abre (flac, que
+# manda el audio a Google; PowerShell; shutdown) los heredan y Windows los
+# rechaza (WinError 50 / 6). Siempre se reemplazan por NUL.
+if getattr(_sys, "frozen", False) and not ctypes.windll.kernel32.GetConsoleWindow():
     import msvcrt
     _nul_lectura = open(os.devnull, "r")
-    _nul_escritura = open(os.devnull, "w")
+    _nul_escritura = open(os.devnull, "w", encoding="utf-8")
     _sys.stdout = _sys.stderr = _nul_escritura
     ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(_nul_lectura.fileno()))    # STDIN
     for _std in (-11, -12):                                                                  # STDOUT, STDERR
@@ -276,6 +278,10 @@ def hilo_supervisor():
 
 def main():
     import sys
+    if "--salir" in sys.argv:  # cierra el Solovino abierto, aunque el ícono no responda
+        cerrado = instancia.pedir_salir_a_la_instancia_abierta()
+        print("Le pedí a Solovino que se cierre." if cerrado else "No había ningún Solovino abierto.")
+        os._exit(0 if cerrado else 1)
     if "--diagnostico" in sys.argv:
         import diagnostico
         diagnostico.correr(abrir_reporte="--silencioso" not in sys.argv)
@@ -294,6 +300,7 @@ def main():
     iniciar_icono_bandeja(on_salir=lambda: apagar("ícono de la bandeja"), on_reiniciar=reiniciar)
     atajos.iniciar_tecla_hablar()
     iniciar_vigilancia_microfono()
+    instancia.escuchar_peticion_de_salir(lambda: apagar("Solovino.exe --salir"))
     if not os.environ.get("GEMINI_API_KEY"):
         # Primera vez (o .exe nuevo sin .env): abre Ajustes para pegar la key.
         mandar_notificacion("Falta la API key de Gemini", "Pégala en la ventana de Ajustes.")

@@ -256,10 +256,25 @@ class VentanaAjustes:
 
         def probar():
             from google import genai
-            genai.Client(api_key=clave).models.get(model=modelo)
+            if not clave:
+                return "✗ Pega primero la key"
+            # El cliente se guarda en una variable: si se usa directo
+            # (genai.Client(...).models.get) Python lo descarta antes de que
+            # llegue la respuesta y truena con "client has been closed".
+            cliente = genai.Client(api_key=clave)
+            try:
+                cliente.models.get(model=modelo)
+            except Exception as e:
+                texto = str(e)
+                if "API_KEY_INVALID" in texto or "API key not valid" in texto:
+                    return "✗ La key no es válida"
+                if "NOT_FOUND" in texto or "404" in texto:
+                    return f"✗ La key sirve, pero no existe el modelo '{modelo}'"
+                if "PERMISSION_DENIED" in texto or "403" in texto:
+                    return "✗ La key no tiene permiso para Gemini"
+                return f"✗ {type(e).__name__}: {texto[:80]}"
             return "✓ Funciona"
-        self._en_hilo(probar, lambda r: self.l_gemini.configure(
-            text=r if r.startswith("✓") else "✗ No funciona (revisa la key o el modelo)"))
+        self._en_hilo(probar, lambda r: self.l_gemini.configure(text=r))
 
     def _conectar_spotify(self):
         import spotify
