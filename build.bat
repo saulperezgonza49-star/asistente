@@ -23,8 +23,14 @@ rem Si Solovino.exe esta abierto, Windows no deja reemplazarlo.
 rem Rutas completas: en algunas terminales (Git Bash) "find" es otro programa.
 "%SystemRoot%\System32\tasklist.exe" /FI "IMAGENAME eq Solovino.exe" /NH | "%SystemRoot%\System32\findstr.exe" /I "Solovino.exe" >nul
 if not errorlevel 1 (
-    echo Solovino esta abierto. Cierralo desde el icono del perrito, Salir, y vuelve a correr build.bat.
-    exit /b 1
+    echo Solovino esta abierto: le pido que se cierre...
+    "dist\Solovino\Solovino.exe" --salir >nul
+    "%SystemRoot%\System32\timeout.exe" /t 4 /nobreak >nul
+    "%SystemRoot%\System32\tasklist.exe" /FI "IMAGENAME eq Solovino.exe" /NH | "%SystemRoot%\System32\findstr.exe" /I "Solovino.exe" >nul
+    if not errorlevel 1 (
+        echo No se cerro. Cierralo desde el Administrador de tareas y vuelve a correr build.bat.
+        exit /b 1
+    )
 )
 
 echo.
