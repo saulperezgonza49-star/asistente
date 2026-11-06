@@ -1,22 +1,49 @@
 """Buscar, abrir y cerrar aplicaciones instaladas en Windows."""
 import os
 import glob
+import functools
 import subprocess
 import webbrowser
 import urllib.parse
 
-from config import USER_PROFILE
+import psutil
+
+from config import NOMBRE, logger
+from rutas import ESCRITORIO
 from voz import hablar
 
+_PERFIL = os.environ.get("USERPROFILE", os.path.expanduser("~"))
 
+# Apps de Windows que no tienen acceso directo con su nombre en español.
+APPS_WINDOWS = {
+    "calculadora": "calc", "bloc de notas": "notepad", "notas": "notepad", "paint": "mspaint",
+    "explorador": "explorer", "explorador de archivos": "explorer", "archivos": "explorer",
+    "administrador de tareas": "taskmgr", "terminal": "wt", "símbolo del sistema": "cmd",
+    "recortes": "snippingtool", "herramienta de recortes": "snippingtool",
+}
+URIS = {
+    "configuracion": "ms-settings:", "configuración": "ms-settings:", "ajustes": "ms-settings:",
+    "spotify": "spotify:", "discord": "discord://", "tienda": "ms-windows-store:",
+    "whatsapp": "whatsapp:", "wasap": "whatsapp:", "uatsap": "whatsapp:",
+    "correo": "outlookmail:", "calendario": "outlookcal:",
+}
+
+# Procesos que nunca se deben matar aunque el nombre coincida por accidente.
+PROCESOS_PROTEGIDOS = {"system", "svchost.exe", "csrss.exe", "winlogon.exe", "wininit.exe",
+                       "lsass.exe", "services.exe", "smss.exe", "explorer.exe", "dwm.exe"}
+
+
+@functools.lru_cache(maxsize=64)
 def buscar_ejecutable_automatico(nombre_app: str) -> str:
-    nombre_app = nombre_app.lower().strip()
+    """Busca un .lnk o .exe que coincida. El resultado se cachea porque la
+    búsqueda recursiva en Program Files tarda varios segundos."""
+    nombre_app = glob.escape(nombre_app.lower().strip())
 
     rutas_busqueda = [
-        f"{USER_PROFILE}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        os.path.join(_PERFIL, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs"),
         r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
-        f"{USER_PROFILE}\\Desktop",
-        f"{USER_PROFILE}\\AppData\\Local\\Programs",
+        ESCRITORIO,
+        os.path.join(_PERFIL, "AppData", "Local", "Programs"),
         r"C:\Program Files",
         r"C:\Program Files (x86)",
     ]
@@ -53,66 +80,72 @@ def buscar_ejecutable_automatico(nombre_app: str) -> str:
 
 
 def abrir_aplicacion(nombre_app: str, avisar_voz: bool = True) -> bool:
-    """Abre WhatsApp/Spotify/Discord/Configuración/Panel de control, o cualquier
-    .exe/.lnk encontrado en disco.
+    """Abre una app: primero las de Windows y las que tienen URI propia
+    (WhatsApp, Spotify, Configuración...), luego busca .lnk/.exe en disco.
 
-    avisar_voz=False es lo que usa ventanas.py para abrir en silencio y
-    reposicionar en un monitor sin duplicar el aviso de voz (antes esto
-    era una función aparte, _abrir_app_silencioso, con la misma lógica
-    copiada dos veces — ahora es una sola).
+    avisar_voz=False se usa desde ventanas.py, rutinas y Gemini, que dan su
+    propio aviso. Con avisar_voz=True, si no la encuentra la busca en Google.
     """
     nombre_app = nombre_app.lower().strip()
+    decir = hablar if avisar_voz else (lambda _texto: None)
 
-    if nombre_app in ["whatsapp", "wasap", "uatsap"]:
-        if avisar_voz:
-            hablar("Abriendo WhatsApp, carnal.")
-        subprocess.Popen("explorer.exe shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App", shell=True)
+    if nombre_app == "panel de control":
+        decir("Abriendo el panel de control.")
+        subprocess.Popen(["control"])
         return True
-
-    if nombre_app in ["spotify", "discord"]:
-        if avisar_voz:
-            hablar(f"Abriendo {nombre_app}, Saúl.")
-        webbrowser.open(f"{nombre_app}://")
+    if nombre_app in APPS_WINDOWS:
+        decir(f"Abriendo {nombre_app}.")
+        subprocess.Popen([APPS_WINDOWS[nombre_app]])
         return True
-
-    if avisar_voz:
-        if nombre_app in ["configuracion", "configuración", "ajustes"]:
-            hablar("Abriendo la configuración.")
-            webbrowser.open("ms-settings:")
-            return True
-        if nombre_app == "panel de control":
-            hablar("Abriendo el panel de control.")
-            subprocess.Popen("control", shell=True)
-            return True
+    if nombre_app in URIS:
+        decir(f"Abriendo {nombre_app}, {NOMBRE}.")
+        os.startfile(URIS[nombre_app])
+        return True
 
     ruta_encontrada = buscar_ejecutable_automatico(nombre_app)
     if ruta_encontrada:
         nombre_limpio = os.path.basename(ruta_encontrada).split(".")[0].capitalize()
-        if avisar_voz:
-            hablar(f"Abriendo {nombre_limpio}, carnal.")
+        decir(f"Abriendo {nombre_limpio}, carnal.")
         if ruta_encontrada.endswith(".lnk"):
             os.startfile(ruta_encontrada)
         else:
-            subprocess.Popen(f'"{ruta_encontrada}"', shell=True)
+            subprocess.Popen([ruta_encontrada], cwd=os.path.dirname(ruta_encontrada))
         return True
 
     if avisar_voz:
-        texto_formateado = urllib.parse.quote(nombre_app)
         hablar("No encontré la aplicación, pero te lo busco en Google.")
-        webbrowser.open(f'https://www.google.com/search?q={texto_formateado}')
+        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(nombre_app)}")
         return True
-
     return False
 
 
-def cerrar_aplicacion(target_app: str) -> str:
-    """Mata cualquier proceso o ventana relacionada con target_app.
-    Regresa el nombre ya normalizado (ej. minecraft -> javaw)."""
+def cerrar_aplicacion(target_app: str) -> int:
+    """Cierra los procesos cuyo nombre contenga target_app y las ventanas
+    cuyo título empiece así. Regresa cuántos procesos se cerraron.
+
+    Antes usaba `taskkill /IM *app*` con shell=True: el texto reconocido
+    iba directo a la consola y el comodín inicial no siempre funciona.
+    """
+    target_app = target_app.lower().strip()
     if target_app in ["wasap", "uatsap"]:
         target_app = "whatsapp"
     if target_app == "minecraft":
         target_app = "javaw"
 
-    subprocess.run(f"taskkill /F /IM *{target_app}*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(f'taskkill /F /FI "WINDOWTITLE eq {target_app}*"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return target_app
+    mi_pid = os.getpid()
+    cerrados = 0
+    for proc in psutil.process_iter(["pid", "name"]):
+        nombre = (proc.info["name"] or "").lower()
+        if (target_app in nombre and proc.info["pid"] != mi_pid
+                and nombre not in PROCESOS_PROTEGIDOS):
+            try:
+                proc.kill()
+                cerrados += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                logger.error(f"No pude cerrar {nombre}: {e}")
+
+    subprocess.run(["taskkill", "/F", "/FI", f"WINDOWTITLE eq {target_app}*"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+    logger.info(f"cerrar_aplicacion('{target_app}'): {cerrados} procesos")
+    return cerrados

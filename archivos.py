@@ -1,14 +1,20 @@
 """Creación de carpetas y acceso al portapapeles (esto último se usa también
 como herramienta de function calling para Gemini, ver ia.py)."""
 import os
+import re
 import pyperclip
 
-from config import USER_PROFILE, logger
+from config import logger
+from rutas import ESCRITORIO
 
 
 def crear_carpeta_en_escritorio(nombre_carpeta: str):
     """Crea la carpeta en el escritorio del usuario. Regresa (ok, ya_existia)."""
-    ruta_carpeta = os.path.join(USER_PROFILE, "Desktop", nombre_carpeta)
+    # Quita caracteres que Windows no permite y evita rutas tipo "..\\algo".
+    nombre_carpeta = re.sub(r'[<>:"/\\|?*]', '', nombre_carpeta).strip(" .")
+    if not nombre_carpeta:
+        return False, False
+    ruta_carpeta = os.path.join(ESCRITORIO, nombre_carpeta)
     if os.path.exists(ruta_carpeta):
         return True, True
     try:
